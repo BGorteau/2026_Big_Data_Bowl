@@ -1,0 +1,236 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Here, the goal is to compute a score similar to the PFF score. In order to do that, we use the `NFLFastR` library.
+
+```{r}
+library(nflfastR)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+```
+
+# Import the stats for the year + 2 years before
+
+```{r}
+player_stats <- load_player_stats(seasons=c(2021, 2022, 2023), stat_type="defense")
+```
+
+```{r}
+player_stats
+```
+
+```{r}
+unique(player_stats$position)
+```
+
+# Compute the score for each position
+
+```{r}
+stats_by_pos <- list("CB" = list("def_tackles"=0.15, 
+                                 "def_tackles_solo"=0.2,
+                                 "def_interceptions"=0.3,
+                                 "def_pass_defended"=0.3,
+                                 "def_fumbles_forced"=0.15,
+                                 "def_penalty"=-0.1),
+                     
+                     "FS" = list("def_tackles"=0.15,
+                                 "def_tackles_solo"=0.1,
+                                 "def_tackles_for_loss"=0.1,
+                                 "def_sacks"=0.1,
+                                 "def_interceptions"=0.25,
+                                 "def_pass_defended"=0.2,
+                                 "def_fumbles_forced"=0.2,
+                                 "def_penalty"=-0.1),
+                     
+                     "SS" = list("def_tackles"=0.1,
+                                 "def_tackles_solo"=0.15,
+                                 "def_tackles_for_loss"=0.15,
+                                 "def_sacks"=0.1,
+                                 "def_interceptions"=0.2,
+                                 "def_pass_defended"=0.15,
+                                 "def_fumbles_forced"=0.25,
+                                 "def_penalty"=-0.1),
+                     
+                     "MLB" = list("def_tackles"=0.2,
+                                 "def_tackles_solo"=0.2,
+                                 "def_tackles_for_loss"=0.2,
+                                 "def_sacks"=0.15,
+                                 "def_interceptions"=0.1,
+                                 "def_pass_defended"=0.15,
+                                 "def_fumbles_forced"=0.1,
+                                 "def_penalty"=-0.1),
+                     
+                     "OLB" = list("def_tackles"=0.2,
+                                 "def_tackles_solo"=0.2,
+                                 "def_tackles_for_loss"=0.2,
+                                 "def_sacks"=0.15,
+                                 "def_interceptions"=0.1,
+                                 "def_pass_defended"=0.15,
+                                 "def_fumbles_forced"=0.1,
+                                 "def_penalty"=-0.1),
+                     
+                     "ILB" = list("def_tackles"=0.2,
+                                 "def_tackles_solo"=0.2,
+                                 "def_tackles_for_loss"=0.2,
+                                 "def_sacks"=0.15,
+                                 "def_interceptions"=0.1,
+                                 "def_pass_defended"=0.15,
+                                 "def_fumbles_forced"=0.1,
+                                 "def_penalty"=-0.1),
+                     
+                     "DE" = list("def_tackles"=0.1,
+                                 "def_tackles_solo"=0.1,
+                                 "def_tackles_for_loss"=0.2,
+                                 "def_sacks"=0.3,
+                                 "def_qb_hits"=0.25,
+                                 "def_fumbles_forced"=0.15,
+                                 "def_penalty"=-0.1),
+                     
+                     "NT" = list("def_tackles"=0.15,
+                                 "def_tackles_solo"=0.15,
+                                 "def_tackles_for_loss"=0.25,
+                                 "def_sacks"=0.25,
+                                 "def_qb_hits"=0.2,
+                                 "def_fumbles_forced"=0.15,
+                                 "def_penalty"=-0.15),
+                     
+                     "DT" = list("def_tackles"=0.15,
+                                 "def_tackles_solo"=0.15,
+                                 "def_tackles_for_loss"=0.25,
+                                 "def_sacks"=0.25,
+                                 "def_qb_hits"=0.2,
+                                 "def_fumbles_forced"=0.15,
+                                 "def_penalty"=-0.15)
+                     )
+```
+
+
+```{r}
+compute_pos_score <- function(stats, pos, s, w){
+  
+  # Get position's column
+  pos_cols <- names(stats_by_pos[[pos]])
+  
+  # Get the stats for the selected position and select the columns
+  pos_stats <- tibble(stats) %>% 
+    filter(position == pos) %>% 
+    select(c(c("season", "week", "season_type", "player_id", "player_name", 
+             "player_display_name", "position", "position_group", "headshot_url", 
+             "team"), pos_cols))
+  
+  # We retrieve the stats before the selected week for the selected season
+  stats_before_week_season <- pos_stats %>%
+    # Apply the filter on season and weeks
+    filter(
+      ((season == s) & (week < w)) |
+        (season %in% c(s-1, s-2))) %>%
+    select(-c(team, week, season_type, season)) %>%
+    # Group the stats for each player
+    group_by(player_id, player_name, player_display_name, position,
+             position_group, headshot_url) %>%
+  summarise(across(pos_cols, mean, na.rm = TRUE), n = n(), .groups = "drop") %>%
+  # Normalize the data
+  mutate(across(pos_cols,
+                ~ (.-min(.)) / (max(.) - min(.))))
+  
+  # Create the performance score
+  # Intitialize the score
+  score <- stats_before_week_season[pos_cols[1]]*100*stats_by_pos[[pos]][[pos_cols[1]]]
+  # Add the other variables
+  for(c_name in pos_cols[2:length(pos_cols)]){
+    score <- score + stats_before_week_season[c_name]*100*stats_by_pos[[pos]][[c_name]]
+  }
+  
+  stats_before_week_season["performance_score"] <- score
+  
+  stats_before_week_season <- stats_before_week_season %>% select(-pos_cols)
+  
+  # Add the players teams at the moment we want
+  players_focus <- pos_stats %>%
+    filter((season == s) & (week == w)) %>% 
+    select(season, week, player_id, player_name, player_display_name, position, 
+           position_group, team)
+  
+  stats_before_week_season <- left_join(players_focus, stats_before_week_season, 
+                                        by = c("player_id", "player_name", 
+                                               "player_display_name", "position", 
+                                               "position_group"))
+  
+  # Fill NA values in the 'performance_score' column by the median
+  stats_before_week_season <- stats_before_week_season %>%
+  mutate(performance_score = if_else(is.na(performance_score),
+                     mean(performance_score, na.rm = TRUE),
+                     performance_score))
+  
+  # RETURN
+  return(stats_before_week_season)
+}
+```
+
+```{r}
+test_data <- compute_pos_score(player_stats, "CB", 2023, 8)
+```
+
+```{r}
+test_data
+```
+
+# Compute the full dataframe
+
+```{r}
+full_data <- tibble()
+for(week in seq(1,18)){
+  for(pos in names(stats_by_pos)){
+    full_data <- bind_rows(full_data, compute_pos_score(player_stats, pos, 2023, week))
+  }
+}
+```
+
+```{r}
+full_data
+```
+
+
+# Make the score between 0 and 100
+
+```{r}
+full_data_transformed <- tibble()
+# Iterate on the positions
+for(pos in names(stats_by_pos)){
+  # Get pos data
+  pos_data <- full_data %>% filter(position==pos)
+  # Get the old min and max score for the position
+  old_min <- min(pos_data["performance_score"])
+  old_max <- max(pos_data["performance_score"])
+  new_min <- 0
+  new_max <- 100
+  transformed_score <- (new_max - new_min) *
+                        (pos_data["performance_score"] - old_min) /
+                        (old_max - old_min) +
+                        new_min
+  pos_data["performance_score"] <- transformed_score
+  full_data_transformed <- bind_rows(full_data_transformed, pos_data)
+}
+```
+
+```{r}
+full_data_transformed
+```
+
+
+```{r}
+ggplot(full_data_transformed %>% filter(position=="CB"), aes(x = performance_score)) +
+  geom_histogram(
+    binwidth = 3,         # Largeur des intervalles
+    fill = "skyblue",     # Couleur de remplissage
+    color = "black"       # Couleur du bord
+  )
+```
+
+```{r}
+write.csv(full_data_transformed, "players_rating.csv")
+```
+
